@@ -60,8 +60,15 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
         if (this.session == null) {
             return request;
         }
-        // Large ID-image uploads: never re-encrypt from the editor; only refresh tokens on the original wire request.
+        // Unmodified / pass-through / read-only:
+        // If the body is already encrypted, return the exact wire request.
+        // refreshTokens() only rewrites x-RToken (and query) — not the body ciphertext —
+        // which desyncs header vs body and makes the server close the connection
+        // ("Unable to read data from the transport connection").
         if (this.passThroughLarge || this.readOnly || !this.editor.isModified()) {
+            if (UltimusMessageParser.hasEncrprmInBody(request)) {
+                return request;
+            }
             try {
                 return UltimusRequestMutator.refreshTokens(request, this.session, this.crypto, this.rToken);
             } catch (Exception e) {
@@ -122,7 +129,7 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
             this.encryptedInQuery = false;
             this.editor.setContents(ByteArray.byteArray(
                     "Large Ultimus payload (" + bodyLen + " bytes) — not decrypted in UI to avoid freezing Burp.\n\n"
-                            + "Forward/Send will pass the original encrypted body through and only refresh x-RToken.\n"
+                            + "Forward/Send will pass the original encrypted request through unchanged (no token rewrite).\n"
                             + "Use the Raw tab to inspect the wire request."));
             this.statusLabel.setText("Large payload pass-through (" + bodyLen + " bytes).");
             return;
@@ -160,7 +167,7 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
                     this.passThroughLarge = true;
                     this.editor.setContents(ByteArray.byteArray(
                             "Large encrprm ciphertext — not decrypted in UI to avoid freezing Burp.\n\n"
-                                    + "Forward/Send will pass the original encrypted body through and only refresh x-RToken."));
+                                    + "Forward/Send will pass the original encrypted request through unchanged."));
                     this.statusLabel.setText("Large encrprm pass-through.");
                     return;
                 }
@@ -169,12 +176,12 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
                     this.passThroughLarge = true;
                     this.editor.setContents(ByteArray.byteArray(
                             "Decrypted payload is too large for the Ultimus editor (" + decrypted.length() + " chars).\n\n"
-                                    + "Forward/Send will pass the original encrypted body through and only refresh x-RToken."));
+                                    + "Forward/Send will pass the original encrypted request through unchanged."));
                     this.statusLabel.setText("Large decrypted pass-through.");
                     return;
                 }
                 this.editor.setContents(ByteArray.byteArray(UltimusMessageParser.prepareEditorText(decrypted)));
-                this.statusLabel.setText("POST body decrypted." + (this.readOnly ? " [read-only]" : " [editable]"));
+                this.statusLabel.setText("POST body decrypted. Unmodified Send keeps wire request." + (this.readOnly ? " [read-only]" : " [editable]"));
             } else {
                 this.encryptedInQuery = true;
                 Optional<String> extractEncrprmFromQuery = UltimusMessageParser.extractEncrprmFromQuery(request);

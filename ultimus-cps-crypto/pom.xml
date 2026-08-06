@@ -6,7 +6,7 @@
 
     <groupId>burp.ultimus</groupId>
     <artifactId>ultimus-cps-crypto</artifactId>
-    <version>1.0.3</version>
+    <version>1.0.4</version>
     <name>Ultimus CPS Crypto</name>
     <description>Burp Suite Montoya extension for Ultimus CPS request/response crypto</description>
 

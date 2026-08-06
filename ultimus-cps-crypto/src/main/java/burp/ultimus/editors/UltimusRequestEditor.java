@@ -51,11 +51,26 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
             return requestResponse != null ? requestResponse.request() : null;
         }
         HttpRequest request = requestResponse.request();
+        // Never block Repeater Send on uploads / huge bodies — pass through unchanged.
+        if (UltimusMessageParser.isMultipartOrBinary(request)
+                || request.body().length() > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
+            return request;
+        }
         if (!editor.isModified()) {
-            return UltimusRequestMutator.refreshTokens(request, session, crypto, rToken);
+            try {
+                return UltimusRequestMutator.refreshTokens(request, session, crypto, rToken);
+            } catch (Exception exception) {
+                api.logging().logToError("Ultimus token refresh failed: " + exception.getMessage());
+                return request;
+            }
         }
         try {
-            String plaintext = new String(editor.getContents().getBytes(), StandardCharsets.UTF_8);
+            byte[] editorBytes = editor.getContents().getBytes();
+            if (editorBytes.length > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
+                api.logging().logToError("Ultimus: editor payload too large to re-encrypt; sending original request.");
+                return request;
+            }
+            String plaintext = new String(editorBytes, StandardCharsets.UTF_8);
             if (encryptedInQuery) {
                 return UltimusRequestMutator.applyQueryPlaintext(request, plaintext, session, crypto, rToken);
             }

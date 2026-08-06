@@ -2,44 +2,133 @@ package burp.ultimus.crypto;
 
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class KeyCache {
     /**
      * Session material embedded in Ultimus HTML is short (rsid + otk + encrypted token).
-     * Without a length cap, CSS/image data-URIs matching {@code base64,...} get treated as
-     * session blobs and AES-decrypting multi-MB payloads freezes Burp's HTTP pipeline
-     * (classic symptom: Repeater spins forever after image upload).
+     * Image data-URIs also contain {@code base64,...} and must never be AES-decrypted —
+     * that freezes Burp's HTTP pipeline (Repeater spins forever after image upload).
      */
     public static final int MAX_SESSION_BLOB_LENGTH = 4096;
     public static final int MIN_SESSION_BLOB_LENGTH = 32;
-    private static final Pattern BACKGROUND_PATTERN = Pattern.compile("base64,([^\"'\\s)]+)", Pattern.CASE_INSENSITIVE);
+
     private final ConcurrentHashMap<String, SessionMaterial> sessions = new ConcurrentHashMap<>();
 
     public void ingestFromHtml(String html, UltimusCrypto crypto) {
         if (html == null || html.isBlank() || crypto == null) {
             return;
         }
-        Matcher matcher = BACKGROUND_PATTERN.matcher(html);
-        while (matcher.find()) {
-            int blobLength = matcher.end(1) - matcher.start(1);
-            // Check length via indices first — avoids allocating multi-MB strings for image data-URIs.
-            if (blobLength < MIN_SESSION_BLOB_LENGTH || blobLength > MAX_SESSION_BLOB_LENGTH) {
+        // Index scan — never let a regex capture a multi-MB image data-URI.
+        int from = 0;
+        while (from < html.length()) {
+            int marker = indexOfIgnoreCase(html, "base64,", from);
+            if (marker < 0) {
+                return;
+            }
+            int blobStart = marker + "base64,".length();
+            if (isImageDataUri(html, marker)) {
+                from = skipPastBlob(html, blobStart);
                 continue;
             }
-            String blob = matcher.group(1);
-            try {
-                String rsid = blob.substring(0, 16);
-                String otk = blob.substring(16, 32);
-                String encryptedSession = blob.substring(32);
-                String sessionToken = crypto.decrypt(encryptedSession, otk);
-                sessions.put(rsid, new SessionMaterial(rsid, otk, sessionToken));
-                return;
-            } catch (RuntimeException ignored) {
-                // Not session material (e.g. truncated image data-URI) — try next match.
+            int blobEnd = scanBase64End(html, blobStart);
+            int blobLength = blobEnd - blobStart;
+            if (blobLength > MAX_SESSION_BLOB_LENGTH) {
+                // Huge blob (image/css) — jump past it without allocating or decrypting.
+                from = skipPastBlob(html, blobStart);
+                continue;
+            }
+            if (blobLength >= MIN_SESSION_BLOB_LENGTH) {
+                String blob = html.substring(blobStart, blobEnd);
+                if (tryIngestBlob(blob, crypto)) {
+                    return;
+                }
+            }
+            from = blobStart + Math.max(1, blobLength);
+        }
+    }
+
+    private boolean tryIngestBlob(String blob, UltimusCrypto crypto) {
+        try {
+            String rsid = blob.substring(0, 16);
+            String otk = blob.substring(16, 32);
+            String encryptedSession = blob.substring(32);
+            String sessionToken = crypto.decrypt(encryptedSession, otk);
+            sessions.put(rsid, new SessionMaterial(rsid, otk, sessionToken));
+            return true;
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * True when {@code base64,} at {@code marker} sits inside a {@code data:image/...;base64,} URI.
+     */
+    static boolean isImageDataUri(String html, int base64Marker) {
+        int dataIdx = lastIndexOfIgnoreCase(html, "data:", base64Marker);
+        if (dataIdx < 0 || base64Marker - dataIdx > 96) {
+            return false;
+        }
+        String prefix = html.substring(dataIdx, base64Marker).toLowerCase();
+        return prefix.contains("image/");
+    }
+
+    static int scanBase64End(String html, int start) {
+        int end = start;
+        int max = Math.min(html.length(), start + MAX_SESSION_BLOB_LENGTH + 1);
+        while (end < max) {
+            char c = html.charAt(end);
+            if (c == '"' || c == '\'' || c == ')' || c == '<' || Character.isWhitespace(c)) {
+                break;
+            }
+            if (!isBase64Char(c)) {
+                break;
+            }
+            end++;
+        }
+        return end;
+    }
+
+    /** Advance past a (possibly multi-MB) base64 blob to the next delimiter. */
+    static int skipPastBlob(String html, int start) {
+        int end = start;
+        while (end < html.length()) {
+            char c = html.charAt(end);
+            if (c == '"' || c == '\'' || c == ')' || c == '<' || Character.isWhitespace(c)) {
+                return end + 1;
+            }
+            if (!isBase64Char(c)) {
+                return end + 1;
+            }
+            end++;
+        }
+        return html.length();
+    }
+
+    private static boolean isBase64Char(char c) {
+        return (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9')
+                || c == '+' || c == '/' || c == '=';
+    }
+
+    private static int indexOfIgnoreCase(String haystack, String needle, int fromIndex) {
+        final int max = haystack.length() - needle.length();
+        for (int i = Math.max(0, fromIndex); i <= max; ++i) {
+            if (haystack.regionMatches(true, i, needle, 0, needle.length())) {
+                return i;
             }
         }
+        return -1;
+    }
+
+    private static int lastIndexOfIgnoreCase(String haystack, String needle, int before) {
+        int start = Math.min(before, haystack.length()) - needle.length();
+        for (int i = start; i >= 0; --i) {
+            if (haystack.regionMatches(true, i, needle, 0, needle.length())) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     public Optional<SessionMaterial> getSession(String rsid) {

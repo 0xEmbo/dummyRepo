@@ -2,27 +2,28 @@
 
 Burp Suite extension that decrypts/re-encrypts Ultimus CPS `encrprm` / `encrdata` traffic.
 
-## Fix in 1.0.3
+## Fix in 1.0.4
 
-Hardened the send/intercept path so large image-upload JSON (`encrprm` / `encrdata`) cannot freeze Burp:
+Repeater **Send** on image upload no longer spins forever:
 
-- HTTP handler skips auto-encrypt work using **byte length before** `bodyToString()` / regex
-- Ultimus request/response tabs refuse to decrypt oversized ciphertext (Raw tab still works)
-- Response intercept editing from 1.0.2 is unchanged
+- Session key capture runs **only for Proxy** traffic (not Repeater/Intruder)
+- `KeyCache` skips `data:image/...;base64,...` with an index scan (no regex capture of multi-MB blobs)
+- Request editor passes through multipart / huge bodies on Send instead of re-encrypting
+- Handler failures never block Burp’s HTTP pipeline
 
 Encrypt/decrypt algorithms are unchanged.
 
+## Fix in 1.0.3
+
+Hardened the send/editor path so large image-upload JSON (`encrprm` / `encrdata`) cannot freeze Burp. Crypto unchanged.
+
 ## Fix in 1.0.2
 
-Intercepted / Repeater responses with `encrdata` are editable in the **Ultimus** response tab. Edits are re-encrypted back into `encrdata` on forward/send. Crypto algorithms are unchanged.
+Intercepted / Repeater responses with `encrdata` are editable in the **Ultimus** response tab. Edits are re-encrypted back into `encrdata` on forward/send. Crypto unchanged.
 
 ## Fix in 1.0.1
 
-Image upload / large HTML responses with `data:image/...;base64,...` no longer freeze Burp Repeater.
-
-**Cause:** `KeyCache.ingestFromHtml` treated the first `base64,...` blob as session material and AES-decrypted multi-MB image payloads on Burp's HTTP handler thread.
-
-**Change:** skip oversized blobs (session keys are &lt; 4KB) and skip binary/huge responses in the HTTP handler. Encrypt/decrypt algorithms are unchanged.
+Image upload / large HTML responses with `data:image/...;base64,...` no longer freeze Burp Repeater via session-ingest AES on image blobs. Crypto unchanged.
 
 ## Build
 
@@ -30,4 +31,6 @@ Image upload / large HTML responses with `data:image/...;base64,...` no longer f
 mvn -f ultimus-cps-crypto/pom.xml -q test package
 ```
 
-Load `ultimus-cps-crypto/target/ultimus-cps-crypto-1.0.3.jar` (or `ultimus-cps-crypto/ultimus-cps-crypto.jar`) in Burp → Extensions.
+Load **`ultimus-cps-crypto/ultimus-cps-crypto.jar`** (1.0.4) in Burp → Extensions.
+
+Browse `https://<host>/UltimusCPS/` through **Proxy** once so session keys are captured, then use Repeater.

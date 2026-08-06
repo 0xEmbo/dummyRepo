@@ -1,6 +1,7 @@
 package burp.ultimus.crypto;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
@@ -46,6 +47,26 @@ class KeyCacheImageUploadHangTest {
         KeyCache cache = new KeyCache();
         assertTimeoutPreemptively(Duration.ofSeconds(5), () -> cache.ingestFromHtml(html, crypto));
         assertEquals(0, cache.size());
+    }
+
+    @Test
+    void ingestSkipsImageEvenWhenUnderLengthCap() {
+        UltimusCrypto crypto = new UltimusCrypto();
+        String fakeImage = Base64.getEncoder().encodeToString("not-a-session".getBytes());
+        String html = "<html UltimusCPS backgroundstyle=\"data:image/png;base64," + fakeImage + "\"></html>";
+        KeyCache cache = new KeyCache();
+        assertTimeoutPreemptively(Duration.ofSeconds(2), () -> cache.ingestFromHtml(html, crypto));
+        assertEquals(0, cache.size());
+        assertTrue(KeyCache.isImageDataUri(html, html.toLowerCase().indexOf("base64,")));
+    }
+
+    @Test
+    void isImageDataUriDetectsPngPrefix() {
+        String html = "x data:image/png;base64,AAAA y";
+        int marker = html.indexOf("base64,");
+        assertTrue(KeyCache.isImageDataUri(html, marker));
+        String octet = "data:application/octet-stream;base64,AAAA";
+        assertFalse(KeyCache.isImageDataUri(octet, octet.indexOf("base64,")));
     }
 
     @Test

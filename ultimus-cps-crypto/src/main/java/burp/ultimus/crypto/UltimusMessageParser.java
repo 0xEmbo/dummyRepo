@@ -12,15 +12,16 @@ public final class UltimusMessageParser {
     private static final Pattern ENCRPRM_QUERY = Pattern.compile("[?&]encrprm=([^&#\\s]+)");
     private static final Pattern ENCRPRM_BODY = Pattern.compile("\"encrprm\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern ENCRDATA_BODY = Pattern.compile("\"encrdata\"\\s*:\\s*\"([^\"]+)\"");
-    /** Skip expand/pretty above this size. */
+    /** Skip expand/pretty above this size (keeps ~500KB ID-image JSON usable in the tab). */
     private static final int EDITOR_PRETTY_LIMIT = 128 * 1024;
     /**
      * Do not decrypt or load payloads larger than this into the Ultimus editor.
-     * ID-image uploads often exceed this; loading them freezes Burp and blocks Forward/Send.
+     * Typical ID-image uploads are ~0.5–2MB encrypted; only extreme sizes are blocked
+     * so Burp does not freeze on Forward/Send.
      */
-    public static final int EDITOR_LOAD_LIMIT = 256 * 1024;
+    public static final int EDITOR_LOAD_LIMIT = 3 * 1024 * 1024;
     /** Skip handler auto-encrypt above this size (client JS should already encrypt). */
-    public static final int AUTO_ENCRYPT_LIMIT = 512 * 1024;
+    public static final int AUTO_ENCRYPT_LIMIT = 3 * 1024 * 1024;
 
     private UltimusMessageParser() {
     }

@@ -54,6 +54,11 @@ public class UltimusHttpHandler implements HttpHandler {
         if (UltimusMessageParser.isMultipartOrBinary(request)) {
             return RequestToBeSentAction.continueWith(request);
         }
+        // Cheap byte-length guard BEFORE bodyToString()/regex — image uploads often ship as
+        // multi-MB JSON encrprm and would freeze Burp's send path (Repeater spins forever).
+        if (request.body().length() > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
+            return RequestToBeSentAction.continueWith(request);
+        }
         if (UltimusMessageParser.hasEncrprmInBody(request)) {
             return RequestToBeSentAction.continueWith(request);
         }
@@ -61,9 +66,6 @@ public class UltimusHttpHandler implements HttpHandler {
             return RequestToBeSentAction.continueWith(request);
         }
         String body = request.bodyToString();
-        if (body != null && body.length() > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
-            return RequestToBeSentAction.continueWith(request);
-        }
         String rsid = UltimusMessageParser.rsidFromRequest(request).orElse(null);
         if (rsid == null) {
             return RequestToBeSentAction.continueWith(request);

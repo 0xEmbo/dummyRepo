@@ -1,6 +1,7 @@
 package burp.ultimus.crypto;
 
 import burp.api.montoya.http.message.requests.HttpRequest;
+import burp.api.montoya.http.message.responses.HttpResponse;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
@@ -14,6 +15,12 @@ public final class UltimusMessageParser {
 
     /** Soft cap for editor pretty-print / expand; larger bodies stay compact to avoid UI freezes. */
     public static final int MAX_EDITOR_PRETTY_CHARS = 512 * 1024;
+
+    /** Soft cap for showing Ultimus editor tabs / decrypting ciphertext in the UI. */
+    public static final int MAX_EDITOR_BODY_BYTES = 2 * 1024 * 1024;
+
+    /** Soft cap for encrprm/encrdata ciphertext length before decrypt-in-editor. */
+    public static final int MAX_EDITOR_CIPHERTEXT_CHARS = 1024 * 1024;
 
     /** Soft cap for auto-encrypt in the HTTP handler (Repeater/proxy path). */
     public static final int MAX_AUTO_ENCRYPT_CHARS = 2 * 1024 * 1024;
@@ -33,7 +40,22 @@ public final class UltimusMessageParser {
         if (request == null) {
             return false;
         }
-        String contentType = headerValue(request, "Content-Type");
+        return isBinaryContentTypeValue(headerValue(request, "Content-Type"));
+    }
+
+    public static boolean isBinaryContentType(HttpResponse response) {
+        if (response == null) {
+            return false;
+        }
+        String contentType = response.headers().stream()
+                .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
+                .map(h -> h.value())
+                .findFirst()
+                .orElse(null);
+        return isBinaryContentTypeValue(contentType);
+    }
+
+    private static boolean isBinaryContentTypeValue(String contentType) {
         if (contentType == null) {
             return false;
         }
@@ -108,11 +130,18 @@ public final class UltimusMessageParser {
     }
 
     public static boolean hasEncrprmInQuery(HttpRequest request) {
-        return extractEncrprmFromQuery(request).isPresent();
+        if (request == null) {
+            return false;
+        }
+        return ENCRPRM_QUERY.matcher(request.path()).find();
     }
 
     public static boolean hasEncrprmInBody(HttpRequest request) {
-        return extractEncrprmFromBody(request).isPresent();
+        if (request == null) {
+            return false;
+        }
+        String body = request.bodyToString();
+        return body != null && !body.isBlank() && ENCRPRM_BODY.matcher(body).find();
     }
 
     public static Optional<String> extractEncrdata(String body) {
@@ -126,8 +155,60 @@ public final class UltimusMessageParser {
         return Optional.empty();
     }
 
+    /**
+     * True when {@code encrdata} is present and within the editor ciphertext budget.
+     * Uses match indices so huge image-upload ciphertexts are not allocated just to reject them.
+     */
+    public static boolean hasEditableEncrdata(String body) {
+        if (body == null || body.isBlank()) {
+            return false;
+        }
+        Matcher matcher = ENCRDATA_BODY.matcher(body);
+        if (!matcher.find()) {
+            return false;
+        }
+        int len = matcher.end(1) - matcher.start(1);
+        return len > 0 && len <= MAX_EDITOR_CIPHERTEXT_CHARS;
+    }
+
+    public static boolean hasEncrdata(String body) {
+        return body != null && !body.isBlank() && ENCRDATA_BODY.matcher(body).find();
+    }
+
     public static boolean hasEncrprm(HttpRequest request) {
         return hasEncrprmInQuery(request) || hasEncrprmInBody(request);
+    }
+
+    /**
+     * True when body {@code encrprm} is present and within the editor ciphertext budget.
+     * Uses match indices so huge image-upload ciphertexts are not allocated just to reject them.
+     */
+    public static boolean hasEditableEncrprmInBody(HttpRequest request) {
+        if (request == null) {
+            return false;
+        }
+        String body = request.bodyToString();
+        if (body == null || body.isBlank()) {
+            return false;
+        }
+        Matcher matcher = ENCRPRM_BODY.matcher(body);
+        if (!matcher.find()) {
+            return false;
+        }
+        int len = matcher.end(1) - matcher.start(1);
+        return len > 0 && len <= MAX_EDITOR_CIPHERTEXT_CHARS;
+    }
+
+    public static boolean hasEditableEncrprmInQuery(HttpRequest request) {
+        if (request == null) {
+            return false;
+        }
+        Matcher matcher = ENCRPRM_QUERY.matcher(request.path());
+        if (!matcher.find()) {
+            return false;
+        }
+        int len = matcher.end(1) - matcher.start(1);
+        return len > 0 && len <= MAX_EDITOR_CIPHERTEXT_CHARS;
     }
 
     public static boolean looksLikePlaintextJson(HttpRequest request) {

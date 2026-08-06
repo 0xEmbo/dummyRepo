@@ -111,6 +111,15 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
             }
             return;
         }
+        String ciphertext = bodyEncrprm.orElseGet(queryEncrprm::get);
+        if (ciphertext.length() > UltimusMessageParser.MAX_EDITOR_CIPHERTEXT_CHARS) {
+            editor.setContents(ByteArray.byteArray(
+                    "encrprm too large to decrypt in editor ("
+                            + ciphertext.length() + " chars).\n"
+                            + "Large image-upload payloads stay on the Raw tab."));
+            statusLabel.setText("encrprm too large.");
+            return;
+        }
         try {
             if (bodyEncrprm.isPresent()) {
                 encryptedInQuery = false;
@@ -142,7 +151,17 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
         if (UltimusMessageParser.isMultipartOrBinary(request)) {
             return false;
         }
-        return UltimusMessageParser.hasEncrprm(request) || UltimusMessageParser.looksLikePlaintextJson(request);
+        // Avoid decrypt on multi-MB image-upload JSON; body byte length is checked first.
+        if (request.body().length() > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+            return false;
+        }
+        if (UltimusMessageParser.hasEncrprmInBody(request)) {
+            return UltimusMessageParser.hasEditableEncrprmInBody(request);
+        }
+        if (UltimusMessageParser.hasEncrprmInQuery(request)) {
+            return UltimusMessageParser.hasEditableEncrprmInQuery(request);
+        }
+        return UltimusMessageParser.looksLikePlaintextJson(request);
     }
 
     @Override

@@ -74,7 +74,26 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
             return;
         }
         HttpResponse response = requestResponse.response();
+        if (response.body().length() > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+            editor.setContents(ByteArray.byteArray(
+                    "Response body too large to decrypt in editor ("
+                            + response.body().length() + " bytes)."));
+            statusLabel.setText("Body too large.");
+            return;
+        }
         String body = response.bodyToString();
+        if (!UltimusMessageParser.hasEditableEncrdata(body)) {
+            if (!UltimusMessageParser.hasEncrdata(body)) {
+                editor.setContents(ByteArray.byteArray("No encrdata field in response."));
+                statusLabel.setText("Nothing to decrypt.");
+            } else {
+                editor.setContents(ByteArray.byteArray(
+                        "encrdata too large to decrypt in editor.\n"
+                                + "Use the Raw tab for large image-upload payloads."));
+                statusLabel.setText("encrdata too large.");
+            }
+            return;
+        }
         Optional<String> encrdata = UltimusMessageParser.extractEncrdata(body);
         if (encrdata.isEmpty()) {
             editor.setContents(ByteArray.byteArray("No encrdata field in response."));
@@ -122,11 +141,15 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
         }
         // Prefer byte length — avoids bodyToString() on huge binary/image responses.
         int bodyBytes = requestResponse.response().body().length();
-        if (bodyBytes <= 0 || bodyBytes > UltimusMessageParser.MAX_EDITOR_PRETTY_CHARS * 4) {
+        if (bodyBytes <= 0 || bodyBytes > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+            return false;
+        }
+        if (UltimusMessageParser.isBinaryContentType(requestResponse.response())) {
             return false;
         }
         String body = requestResponse.response().bodyToString();
-        return UltimusMessageParser.extractEncrdata(body).isPresent();
+        // Skip enabling the tab when ciphertext alone would freeze decrypt/pretty-print.
+        return UltimusMessageParser.hasEditableEncrdata(body);
     }
 
     @Override

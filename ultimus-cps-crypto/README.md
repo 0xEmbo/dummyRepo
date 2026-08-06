@@ -2,6 +2,16 @@
 
 Burp Suite extension that decrypts/re-encrypts Ultimus CPS `encrprm` / `encrdata` traffic.
 
+## Fix in 1.0.3
+
+Hardened the send/intercept path so large image-upload JSON (`encrprm` / `encrdata`) cannot freeze Burp:
+
+- HTTP handler skips auto-encrypt work using **byte length before** `bodyToString()` / regex
+- Ultimus request/response tabs refuse to decrypt oversized ciphertext (Raw tab still works)
+- Response intercept editing from 1.0.2 is unchanged
+
+Encrypt/decrypt algorithms are unchanged.
+
 ## Fix in 1.0.2
 
 Intercepted / Repeater responses with `encrdata` are editable in the **Ultimus** response tab. Edits are re-encrypted back into `encrdata` on forward/send. Crypto algorithms are unchanged.
@@ -20,4 +30,4 @@ Image upload / large HTML responses with `data:image/...;base64,...` no longer f
 mvn -f ultimus-cps-crypto/pom.xml -q test package
 ```
 
-Load `ultimus-cps-crypto/target/ultimus-cps-crypto-1.0.2.jar` in Burp → Extensions.
+Load `ultimus-cps-crypto/target/ultimus-cps-crypto-1.0.3.jar` (or `ultimus-cps-crypto/ultimus-cps-crypto.jar`) in Burp → Extensions.

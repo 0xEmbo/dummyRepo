@@ -114,7 +114,12 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
         if (sessionOpt.isEmpty()) {
             editor.setContents(ByteArray.byteArray(
                     "No session cached for RSID: " + rsid.get()
-                            + "\n\nBrowse https://<host>/UltimusCPS/ through Burp once, then reopen this request."));
+                            + "\n\nCached sessions: " + keyCache.size()
+                            + "\n\nFix:\n"
+                            + "1) In Proxy history, open the /UltimusCPS/ HTML response\n"
+                            + "2) Click the Ultimus tab (captures session keys)\n"
+                            + "3) Confirm Extender output: \"Ultimus session captured\"\n"
+                            + "4) Re-open this request"));
             statusLabel.setText("Session missing.");
             return;
         }

@@ -14,6 +14,7 @@ import burp.ultimus.crypto.UltimusCrypto;
 import burp.ultimus.crypto.UltimusMessageParser;
 import burp.ultimus.crypto.UltimusRToken;
 import burp.ultimus.crypto.UltimusRequestMutator;
+import burp.ultimus.crypto.UltimusSessionCapture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -22,9 +23,6 @@ import java.util.concurrent.Executors;
  * Session ingest runs on a background thread; auto-encrypt is limited to tiny JSON bodies.
  */
 public class UltimusHttpHandler implements HttpHandler {
-    /** Only tiny HTML session pages — never upload responses. */
-    private static final int MAX_SESSION_INGEST_BODY_BYTES = 64 * 1024;
-
     /** Auto-encrypt only small plaintext JSON; image uploads must pass through untouched. */
     private static final int MAX_AUTO_ENCRYPT_BODY_BYTES = 64 * 1024;
 
@@ -60,30 +58,40 @@ public class UltimusHttpHandler implements HttpHandler {
         if (response == null) {
             return;
         }
-        if (response.toolSource() != null && !response.toolSource().isFromTool(ToolType.PROXY)) {
-            return;
-        }
-        if (!looksLikeSmallHtml(response)) {
+        // Prefer Proxy (browser). Also accept Repeater/other for small Ultimus HTML so
+        // "open /UltimusCPS/ in Repeater" still caches keys — ingest is async + image-safe.
+        boolean fromProxy = response.toolSource() == null || response.toolSource().isFromTool(ToolType.PROXY);
+        if (!looksLikeCapturableResponse(response)) {
             return;
         }
         int bodyLen = response.body().length();
-        if (bodyLen <= 0 || bodyLen > MAX_SESSION_INGEST_BODY_BYTES) {
+        if (bodyLen <= 0 || bodyLen > UltimusSessionCapture.MAX_ASYNC_INGEST_BODY_BYTES) {
             return;
         }
-        // Copy body off the request object, then process async.
+        // For non-Proxy tools, only attempt on clearly small pages to avoid upload responses.
+        if (!fromProxy && bodyLen > 256 * 1024) {
+            return;
+        }
         final String body = response.bodyToString();
-        if (body == null || body.length() > MAX_SESSION_INGEST_BODY_BYTES) {
+        if (body == null || body.length() > UltimusSessionCapture.MAX_ASYNC_INGEST_BODY_BYTES) {
             return;
         }
-        if (!UltimusMessageParser.isUltimusHtml(body)) {
+        if (!UltimusSessionCapture.looksLikeUltimusHtml(body)) {
+            return;
+        }
+        // Skip scheduling pure image-upload HTML shells with no octet-stream session marker.
+        if (body.toLowerCase().contains("data:image") && !body.toLowerCase().contains("octet-stream")) {
             return;
         }
         ingestExecutor.execute(() -> {
             try {
-                int before = keyCache.size();
-                keyCache.ingestFromHtml(body, crypto);
-                if (keyCache.size() > before) {
+                int added = UltimusSessionCapture.capture(body, keyCache, crypto);
+                if (added > 0) {
                     api.logging().logToOutput("Ultimus session captured (cache size: " + keyCache.size() + ")");
+                } else if (UltimusSessionCapture.looksLikeUltimusHtml(body)) {
+                    api.logging().logToOutput(
+                            "Ultimus HTML seen but no session blob decrypted yet (cache size: "
+                                    + keyCache.size() + "). Open the /UltimusCPS/ response Ultimus tab.");
                 }
             } catch (Throwable throwable) {
                 api.logging().logToError("Ultimus session ingest failed: " + throwable.getMessage());
@@ -93,7 +101,6 @@ public class UltimusHttpHandler implements HttpHandler {
 
     @Override
     public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent request) {
-        // Default: pass through. Only tiny plaintext Ultimus JSON is auto-encrypted.
         try {
             HttpRequest maybeEncrypted = maybeAutoEncrypt(request);
             return RequestToBeSentAction.continueWith(maybeEncrypted);
@@ -111,7 +118,6 @@ public class UltimusHttpHandler implements HttpHandler {
             return request;
         }
         int bodyLen = request.body().length();
-        // Image uploads and large encrprm JSON — do nothing.
         if (bodyLen <= 0 || bodyLen > MAX_AUTO_ENCRYPT_BODY_BYTES) {
             return request;
         }
@@ -134,18 +140,29 @@ public class UltimusHttpHandler implements HttpHandler {
         return UltimusRequestMutator.applyBodyPlaintext(request, plaintext, session, crypto, rToken);
     }
 
-    private static boolean looksLikeSmallHtml(HttpResponseReceived response) {
+    private static boolean looksLikeCapturableResponse(HttpResponseReceived response) {
         String contentType = response.headers().stream()
                 .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
                 .map(h -> h.value())
                 .findFirst()
                 .orElse("");
         String lower = contentType.toLowerCase();
+        if (lower.contains("image/")
+                || lower.contains("multipart/")
+                || lower.contains("application/octet-stream")
+                || lower.contains("application/pdf")
+                || lower.contains("application/json")
+                || lower.contains("video/")
+                || lower.contains("audio/")
+                || lower.contains("font/")) {
+            return false;
+        }
         if (lower.isEmpty()) {
-            return true; // may still be HTML without header
+            return true;
         }
         return lower.contains("text/html")
                 || lower.contains("text/plain")
-                || lower.contains("application/xhtml");
+                || lower.contains("application/xhtml")
+                || lower.contains("javascript");
     }
 }

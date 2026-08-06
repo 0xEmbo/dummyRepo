@@ -33,7 +33,7 @@ public final class UltimusMessageParser {
     }
 
     public static boolean isUltimusHtml(String body) {
-        return body != null && body.contains("backgroundstyle") && body.contains("base64,") && body.contains("UltimusCPS");
+        return UltimusSessionCapture.looksLikeUltimusHtml(body);
     }
 
     public static boolean isMultipartOrBinary(HttpRequest request) {

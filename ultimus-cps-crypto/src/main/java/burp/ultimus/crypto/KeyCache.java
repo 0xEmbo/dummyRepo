@@ -26,6 +26,10 @@ public class KeyCache {
                 return;
             }
             int blobStart = marker + "base64,".length();
+            // Skip optional whitespace after "base64,"
+            while (blobStart < html.length() && Character.isWhitespace(html.charAt(blobStart))) {
+                blobStart++;
+            }
             if (isImageDataUri(html, marker)) {
                 from = skipPastBlob(html, blobStart);
                 continue;
@@ -33,7 +37,6 @@ public class KeyCache {
             int blobEnd = scanBase64End(html, blobStart);
             int blobLength = blobEnd - blobStart;
             if (blobLength > MAX_SESSION_BLOB_LENGTH) {
-                // Huge blob (image/css) — jump past it without allocating or decrypting.
                 from = skipPastBlob(html, blobStart);
                 continue;
             }
@@ -49,9 +52,15 @@ public class KeyCache {
 
     private boolean tryIngestBlob(String blob, UltimusCrypto crypto) {
         try {
-            String rsid = blob.substring(0, 16);
-            String otk = blob.substring(16, 32);
-            String encryptedSession = blob.substring(32);
+            // Strip whitespace/newlines that some pages insert into data-URIs.
+            String compact = blob.replace("\r", "").replace("\n", "").replace("\t", "").replace(" ", "");
+            if (compact.length() < MIN_SESSION_BLOB_LENGTH) {
+                return false;
+            }
+            String rsid = compact.substring(0, 16);
+            String otk = compact.substring(16, 32);
+            // Ciphertext may be percent-encoded or URL-safe base64 in HTML.
+            String encryptedSession = compact.substring(32);
             String sessionToken = crypto.decrypt(encryptedSession, otk);
             sessions.put(rsid, new SessionMaterial(rsid, otk, sessionToken));
             return true;
@@ -77,10 +86,10 @@ public class KeyCache {
         int max = Math.min(html.length(), start + MAX_SESSION_BLOB_LENGTH + 1);
         while (end < max) {
             char c = html.charAt(end);
-            if (c == '"' || c == '\'' || c == ')' || c == '<' || Character.isWhitespace(c)) {
+            if (c == '"' || c == '\'' || c == ')' || c == '<' || c == '>' || c == ';' || Character.isWhitespace(c)) {
                 break;
             }
-            if (!isBase64Char(c)) {
+            if (!isBlobChar(c)) {
                 break;
             }
             end++;
@@ -93,10 +102,10 @@ public class KeyCache {
         int end = start;
         while (end < html.length()) {
             char c = html.charAt(end);
-            if (c == '"' || c == '\'' || c == ')' || c == '<' || Character.isWhitespace(c)) {
+            if (c == '"' || c == '\'' || c == ')' || c == '<' || c == '>' || Character.isWhitespace(c)) {
                 return end + 1;
             }
-            if (!isBase64Char(c)) {
+            if (!isBlobChar(c)) {
                 return end + 1;
             }
             end++;
@@ -104,11 +113,14 @@ public class KeyCache {
         return html.length();
     }
 
-    private static boolean isBase64Char(char c) {
+    /** Standard / URL-safe base64 plus percent-encoding used in some Ultimus HTML embeds. */
+    private static boolean isBlobChar(char c) {
         return (c >= 'A' && c <= 'Z')
                 || (c >= 'a' && c <= 'z')
                 || (c >= '0' && c <= '9')
-                || c == '+' || c == '/' || c == '=';
+                || c == '+' || c == '/' || c == '='
+                || c == '-' || c == '_'
+                || c == '%';
     }
 
     private static int indexOfIgnoreCase(String haystack, String needle, int fromIndex) {
@@ -135,7 +147,17 @@ public class KeyCache {
         if (rsid == null || rsid.isBlank()) {
             return Optional.empty();
         }
-        return Optional.ofNullable(sessions.get(rsid));
+        SessionMaterial exact = sessions.get(rsid);
+        if (exact != null) {
+            return Optional.of(exact);
+        }
+        // Header casing can differ from the HTML-embedded RSID.
+        for (var entry : sessions.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(rsid)) {
+                return Optional.of(entry.getValue());
+            }
+        }
+        return Optional.empty();
     }
 
     public Optional<String> getOtk(String rsid) {

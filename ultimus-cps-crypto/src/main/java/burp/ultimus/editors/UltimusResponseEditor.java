@@ -13,6 +13,7 @@ import burp.ultimus.crypto.KeyCache;
 import burp.ultimus.crypto.UltimusCrypto;
 import burp.ultimus.crypto.UltimusMessageParser;
 import burp.ultimus.crypto.UltimusResponseMutator;
+import burp.ultimus.crypto.UltimusSessionCapture;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.nio.charset.StandardCharsets;
@@ -81,15 +82,48 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
             return;
         }
         HttpResponse response = requestResponse.response();
-        if (response.body().length() > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+        int bodyBytes = response.body().length();
+        if (bodyBytes <= 0) {
+            editor.setContents(ByteArray.byteArray("Empty response."));
+            statusLabel.setText("Empty.");
+            return;
+        }
+        // Allow larger bodies for HTML session capture than for encrdata decrypt.
+        if (bodyBytes > UltimusSessionCapture.MAX_ASYNC_INGEST_BODY_BYTES) {
             editor.setContents(ByteArray.byteArray(
-                    "Response body too large to decrypt in editor ("
-                            + response.body().length() + " bytes)."));
+                    "Response body too large (" + bodyBytes + " bytes)."));
             statusLabel.setText("Body too large.");
             return;
         }
         String body = response.bodyToString();
+
+        // Always try to capture session keys when Ultimus HTML is opened in this tab.
+        if (UltimusSessionCapture.looksLikeUltimusHtml(body)) {
+            int added = UltimusSessionCapture.capture(body, keyCache, crypto);
+            if (added > 0) {
+                api.logging().logToOutput("Ultimus session captured from response editor (cache size: "
+                        + keyCache.size() + ")");
+            }
+        }
+
         if (!UltimusMessageParser.hasEditableEncrdata(body)) {
+            if (UltimusSessionCapture.looksLikeUltimusHtml(body)) {
+                editor.setContents(ByteArray.byteArray(
+                        "Ultimus HTML session page.\n"
+                                + "Cached sessions: " + keyCache.size() + "\n\n"
+                                + (keyCache.size() > 0
+                                ? "Session keys captured. Re-open your Repeater request Ultimus tab."
+                                : "No session blob decrypted from this page.\n"
+                                + "Confirm the response contains data:application/octet-stream;base64,<rsid+otk+token>.")
+                ));
+                statusLabel.setText(keyCache.size() > 0 ? "Session cached." : "No session blob found.");
+                return;
+            }
+            if (bodyBytes > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+                editor.setContents(ByteArray.byteArray("Body too large for encrdata editor."));
+                statusLabel.setText("Body too large.");
+                return;
+            }
             if (!UltimusMessageParser.hasEncrdata(body)) {
                 editor.setContents(ByteArray.byteArray("No encrdata field in response."));
                 statusLabel.setText("Nothing to decrypt.");
@@ -122,7 +156,8 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
         if (otkOpt.isEmpty()) {
             editor.setContents(ByteArray.byteArray(
                     "No OTK cached for RSID: " + rsid.get()
-                            + "\n\nLoad /UltimusCPS/ through Burp first."));
+                            + "\n\nOpen the /UltimusCPS/ HTML response, select the Ultimus tab to capture keys,"
+                            + " then reopen this response."));
             statusLabel.setText("OTK missing.");
             return;
         }
@@ -148,14 +183,19 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
                 return false;
             }
             int bodyBytes = requestResponse.response().body().length();
-            if (bodyBytes <= 0 || bodyBytes > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+            if (bodyBytes <= 0 || bodyBytes > UltimusSessionCapture.MAX_ASYNC_INGEST_BODY_BYTES) {
                 return false;
             }
             if (UltimusMessageParser.isBinaryContentType(requestResponse.response())) {
                 return false;
             }
             String body = requestResponse.response().bodyToString();
-            return UltimusMessageParser.hasEditableEncrdata(body);
+            if (bodyBytes <= UltimusMessageParser.MAX_EDITOR_BODY_BYTES
+                    && UltimusMessageParser.hasEditableEncrdata(body)) {
+                return true;
+            }
+            // Enable for Ultimus HTML so opening this tab captures session keys.
+            return UltimusSessionCapture.looksLikeUltimusHtml(body);
         } catch (RuntimeException ignored) {
             return false;
         }

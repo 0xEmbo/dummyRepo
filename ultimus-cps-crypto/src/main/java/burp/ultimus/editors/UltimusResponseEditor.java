@@ -1,0 +1,223 @@
+package burp.ultimus.editors;
+
+import burp.api.montoya.MontoyaApi;
+import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.http.message.HttpRequestResponse;
+import burp.api.montoya.http.message.responses.HttpResponse;
+import burp.api.montoya.ui.Selection;
+import burp.api.montoya.ui.editor.EditorOptions;
+import burp.api.montoya.ui.editor.RawEditor;
+import burp.api.montoya.ui.editor.extension.EditorMode;
+import burp.api.montoya.ui.editor.extension.ExtensionProvidedHttpResponseEditor;
+import burp.ultimus.crypto.KeyCache;
+import burp.ultimus.crypto.UltimusCrypto;
+import burp.ultimus.crypto.UltimusMessageParser;
+import burp.ultimus.crypto.UltimusResponseMutator;
+import burp.ultimus.crypto.UltimusSessionCapture;
+import java.awt.BorderLayout;
+import java.awt.Component;
+import java.nio.charset.StandardCharsets;
+import java.util.Optional;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+
+public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEditor {
+    private final MontoyaApi api;
+    private final KeyCache keyCache;
+    private final UltimusCrypto crypto;
+    private final boolean readOnly;
+    private HttpRequestResponse requestResponse;
+    private String otk;
+    private final JPanel panel = new JPanel(new BorderLayout(4, 4));
+    private final JLabel statusLabel = new JLabel(" ");
+    private final RawEditor editor;
+
+    public UltimusResponseEditor(MontoyaApi api, KeyCache keyCache, UltimusCrypto crypto, EditorMode editorMode) {
+        this.api = api;
+        this.keyCache = keyCache;
+        this.crypto = crypto;
+        this.readOnly = editorMode == EditorMode.READ_ONLY;
+        this.editor = this.readOnly
+                ? api.userInterface().createRawEditor(EditorOptions.READ_ONLY)
+                : api.userInterface().createRawEditor();
+        if (!this.readOnly) {
+            this.editor.setEditable(true);
+        }
+        this.panel.add(this.statusLabel, BorderLayout.NORTH);
+        this.panel.add(this.editor.uiComponent(), BorderLayout.CENTER);
+    }
+
+    @Override
+    public HttpResponse getResponse() {
+        if (requestResponse == null || requestResponse.response() == null) {
+            return null;
+        }
+        HttpResponse response = requestResponse.response();
+        if (readOnly || otk == null || !editor.isModified()) {
+            return response;
+        }
+        try {
+            byte[] editorBytes = editor.getContents().getBytes();
+            if (editorBytes.length > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
+                return response;
+            }
+            String plaintext = new String(editorBytes, StandardCharsets.UTF_8);
+            if (plaintext.contains("data:image")) {
+                return response;
+            }
+            return UltimusResponseMutator.applyPlaintext(response, plaintext, otk, crypto);
+        } catch (Exception exception) {
+            api.logging().logToError("Ultimus response re-encrypt failed: " + exception.getMessage());
+            return response;
+        }
+    }
+
+    @Override
+    public void setRequestResponse(HttpRequestResponse requestResponse) {
+        this.requestResponse = requestResponse;
+        this.otk = null;
+        if (requestResponse == null || requestResponse.response() == null) {
+            editor.setContents(ByteArray.byteArray(""));
+            statusLabel.setText("No response.");
+            return;
+        }
+        HttpResponse response = requestResponse.response();
+        int bodyBytes = response.body().length();
+        if (bodyBytes <= 0) {
+            editor.setContents(ByteArray.byteArray("Empty response."));
+            statusLabel.setText("Empty.");
+            return;
+        }
+        // Allow larger bodies for HTML session capture than for encrdata decrypt.
+        if (bodyBytes > UltimusSessionCapture.MAX_ASYNC_INGEST_BODY_BYTES) {
+            editor.setContents(ByteArray.byteArray(
+                    "Response body too large (" + bodyBytes + " bytes)."));
+            statusLabel.setText("Body too large.");
+            return;
+        }
+        String body = response.bodyToString();
+
+        // Always try to capture session keys when Ultimus HTML is opened in this tab.
+        if (UltimusSessionCapture.looksLikeUltimusHtml(body)) {
+            int added = UltimusSessionCapture.capture(body, keyCache, crypto);
+            if (added > 0) {
+                api.logging().logToOutput("Ultimus session captured from response editor (cache size: "
+                        + keyCache.size() + ")");
+            }
+        }
+
+        if (!UltimusMessageParser.hasEditableEncrdata(body)) {
+            if (UltimusSessionCapture.looksLikeUltimusHtml(body)) {
+                editor.setContents(ByteArray.byteArray(
+                        "Ultimus HTML session page.\n"
+                                + "Cached sessions: " + keyCache.size() + "\n\n"
+                                + (keyCache.size() > 0
+                                ? "Session keys captured. Re-open your Repeater request Ultimus tab."
+                                : "No session blob decrypted from this page.\n"
+                                + "Confirm the response contains data:application/octet-stream;base64,<rsid+otk+token>.")
+                ));
+                statusLabel.setText(keyCache.size() > 0 ? "Session cached." : "No session blob found.");
+                return;
+            }
+            if (bodyBytes > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+                editor.setContents(ByteArray.byteArray("Body too large for encrdata editor."));
+                statusLabel.setText("Body too large.");
+                return;
+            }
+            if (!UltimusMessageParser.hasEncrdata(body)) {
+                editor.setContents(ByteArray.byteArray("No encrdata field in response."));
+                statusLabel.setText("Nothing to decrypt.");
+            } else {
+                editor.setContents(ByteArray.byteArray(
+                        "encrdata too large to decrypt in editor.\n"
+                                + "Use the Raw tab for large image-upload payloads."));
+                statusLabel.setText("encrdata too large.");
+            }
+            return;
+        }
+        Optional<String> encrdata = UltimusMessageParser.extractEncrdata(body);
+        if (encrdata.isEmpty()) {
+            editor.setContents(ByteArray.byteArray("No encrdata field in response."));
+            statusLabel.setText("Nothing to decrypt.");
+            return;
+        }
+        if (requestResponse.request() == null) {
+            editor.setContents(ByteArray.byteArray("Need matching request (RSID header) to decrypt."));
+            statusLabel.setText("Missing request.");
+            return;
+        }
+        Optional<String> rsid = UltimusMessageParser.rsidFromRequest(requestResponse.request());
+        if (rsid.isEmpty()) {
+            editor.setContents(ByteArray.byteArray("Missing RSID header on request."));
+            statusLabel.setText("No RSID.");
+            return;
+        }
+        Optional<String> otkOpt = keyCache.getOtk(rsid.get());
+        if (otkOpt.isEmpty()) {
+            editor.setContents(ByteArray.byteArray(
+                    "No OTK cached for RSID: " + rsid.get()
+                            + "\n\nOpen the /UltimusCPS/ HTML response, select the Ultimus tab to capture keys,"
+                            + " then reopen this response."));
+            statusLabel.setText("OTK missing.");
+            return;
+        }
+        this.otk = otkOpt.get();
+        try {
+            String decrypted = crypto.decrypt(encrdata.get(), otk);
+            String formatted = UltimusMessageParser.formatForEditor(decrypted);
+            editor.setContents(ByteArray.byteArray(UltimusMessageParser.prettyJson(formatted)));
+            statusLabel.setText(readOnly
+                    ? "Decrypted response (read-only). RSID=" + rsid.get()
+                    : "Decrypted response — edit then forward/send to re-encrypt. RSID=" + rsid.get());
+        } catch (Exception exception) {
+            this.otk = null;
+            editor.setContents(ByteArray.byteArray("Decrypt failed: " + exception.getMessage()));
+            statusLabel.setText("Decrypt error.");
+        }
+    }
+
+    @Override
+    public boolean isEnabledFor(HttpRequestResponse requestResponse) {
+        try {
+            if (requestResponse == null || requestResponse.response() == null) {
+                return false;
+            }
+            int bodyBytes = requestResponse.response().body().length();
+            if (bodyBytes <= 0 || bodyBytes > UltimusSessionCapture.MAX_ASYNC_INGEST_BODY_BYTES) {
+                return false;
+            }
+            if (UltimusMessageParser.isBinaryContentType(requestResponse.response())) {
+                return false;
+            }
+            String body = requestResponse.response().bodyToString();
+            if (bodyBytes <= UltimusMessageParser.MAX_EDITOR_BODY_BYTES
+                    && UltimusMessageParser.hasEditableEncrdata(body)) {
+                return true;
+            }
+            // Enable for Ultimus HTML so opening this tab captures session keys.
+            return UltimusSessionCapture.looksLikeUltimusHtml(body);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    @Override
+    public String caption() {
+        return "Ultimus";
+    }
+
+    @Override
+    public Component uiComponent() {
+        return panel;
+    }
+
+    @Override
+    public Selection selectedData() {
+        return editor.selection().orElse(null);
+    }
+
+    @Override
+    public boolean isModified() {
+        return !readOnly && editor.isModified();
+    }
+}

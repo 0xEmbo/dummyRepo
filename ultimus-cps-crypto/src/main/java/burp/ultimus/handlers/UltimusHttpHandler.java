@@ -27,7 +27,7 @@ public class UltimusHttpHandler implements HttpHandler {
     }
 
     public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived httpResponseReceived) {
-        // Skip binary/image responses so large upload responses do not block Burp on bodyToString/HTML scan.
+        // Skip binary/image/json responses so large upload responses do not block Burp on bodyToString/HTML scan.
         if (!UltimusMessageParser.looksLikeHtmlCandidate(httpResponseReceived.headerValue("Content-Type"))) {
             return ResponseReceivedAction.continueWith(httpResponseReceived);
         }
@@ -46,10 +46,17 @@ public class UltimusHttpHandler implements HttpHandler {
         if (!UltimusMessageParser.isUltimusRequest(httpRequestToBeSent)) {
             return RequestToBeSentAction.continueWith(httpRequestToBeSent);
         }
+        // Already encrypted (typical browser form submit / ID image upload) — pass through immediately.
         if (UltimusMessageParser.hasEncrprmInBody(httpRequestToBeSent)) {
             return RequestToBeSentAction.continueWith(httpRequestToBeSent);
         }
         if (!UltimusMessageParser.looksLikePlaintextJson(httpRequestToBeSent)) {
+            return RequestToBeSentAction.continueWith(httpRequestToBeSent);
+        }
+        // Do not auto-encrypt huge plaintext on the proxy thread (blocks browser "loading").
+        int bodyLen = UltimusMessageParser.bodyLength(httpRequestToBeSent);
+        if (bodyLen > UltimusMessageParser.AUTO_ENCRYPT_LIMIT) {
+            this.api.logging().logToOutput("Ultimus: skipping auto-encrypt for large plaintext body (" + bodyLen + " bytes).");
             return RequestToBeSentAction.continueWith(httpRequestToBeSent);
         }
         String orElse = UltimusMessageParser.rsidFromRequest(httpRequestToBeSent).orElse(null);

@@ -21,4 +21,4 @@ Created-By: Ultimus CPS Crypto rebuild
 EOF
 jar cfm "$ROOT/build/jar/ultimus-cps-crypto.jar" "$ROOT/build/manifest.mf" -C "$ROOT/build/shade" .
 cp "$ROOT/build/jar/ultimus-cps-crypto.jar" "$ROOT/ultimus-cps-crypto.jar"
-echo "Built $ROOT/ultimus-cps-crypto.jar"
+echo "Built $ROOT/ultimus-cps-crypto.jar ($(wc -c < "$ROOT/ultimus-cps-crypto.jar") bytes)"

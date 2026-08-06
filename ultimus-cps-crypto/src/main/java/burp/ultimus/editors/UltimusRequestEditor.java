@@ -30,6 +30,7 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
     private final boolean readOnly;
     private HttpRequestResponse requestResponse;
     private boolean encryptedInQuery;
+    private boolean passThroughLarge;
     private SessionMaterial session;
     private final JPanel panel = new JPanel(new BorderLayout(4, 4));
     private final JLabel statusLabel = new JLabel(" ");
@@ -59,8 +60,8 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
         if (this.session == null) {
             return request;
         }
-        // Unmodified: only refresh tokens on the original wire request (avoids re-encrypting huge image payloads on Send).
-        if (this.readOnly || !this.editor.isModified()) {
+        // Large ID-image uploads: never re-encrypt from the editor; only refresh tokens on the original wire request.
+        if (this.passThroughLarge || this.readOnly || !this.editor.isModified()) {
             try {
                 return UltimusRequestMutator.refreshTokens(request, this.session, this.crypto, this.rToken);
             } catch (Exception e) {
@@ -83,6 +84,7 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
     public void setRequestResponse(HttpRequestResponse httpRequestResponse) {
         this.requestResponse = httpRequestResponse;
         this.encryptedInQuery = false;
+        this.passThroughLarge = false;
         this.session = null;
         if (httpRequestResponse == null || httpRequestResponse.request() == null) {
             this.editor.setContents(ByteArray.byteArray(""));
@@ -108,10 +110,34 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
             return;
         }
         this.session = sessionOpt.get();
-        Optional<String> extractEncrprmFromBody = UltimusMessageParser.extractEncrprmFromBody(request);
-        Optional<String> extractEncrprmFromQuery = UltimusMessageParser.extractEncrprmFromQuery(request);
-        if (extractEncrprmFromBody.isEmpty() && extractEncrprmFromQuery.isEmpty()) {
+
+        int bodyLen = UltimusMessageParser.bodyLength(request);
+        boolean hasBodyEncr = UltimusMessageParser.hasEncrprmInBody(request);
+        boolean hasQueryEncr = UltimusMessageParser.hasEncrprmInQuery(request);
+
+        // Oversized bodies (typical ID-image upload): do not decrypt or load into the editor.
+        // Decrypt + setContents of multi-MB payloads freezes Burp and blocks Forward/Send.
+        if (hasBodyEncr && UltimusMessageParser.isOversizedForEditor(request)) {
+            this.passThroughLarge = true;
+            this.encryptedInQuery = false;
+            this.editor.setContents(ByteArray.byteArray(
+                    "Large Ultimus payload (" + bodyLen + " bytes) — not decrypted in UI to avoid freezing Burp.\n\n"
+                            + "Forward/Send will pass the original encrypted body through and only refresh x-RToken.\n"
+                            + "Use the Raw tab to inspect the wire request."));
+            this.statusLabel.setText("Large payload pass-through (" + bodyLen + " bytes).");
+            return;
+        }
+
+        if (!hasBodyEncr && !hasQueryEncr) {
             if (UltimusMessageParser.looksLikePlaintextJson(request)) {
+                if (UltimusMessageParser.isOversizedForEditor(request)) {
+                    this.passThroughLarge = true;
+                    this.editor.setContents(ByteArray.byteArray(
+                            "Large plaintext Ultimus JSON (" + bodyLen + " bytes) — not loaded in UI.\n\n"
+                                    + "Forward/Send passes the original body through (handler may auto-encrypt if under limit)."));
+                    this.statusLabel.setText("Large plaintext pass-through (" + bodyLen + " bytes).");
+                    return;
+                }
                 this.editor.setContents(ByteArray.byteArray(UltimusMessageParser.prepareEditorText(request.bodyToString())));
                 this.statusLabel.setText("Plaintext body." + (this.readOnly ? " [read-only]" : " [editable]"));
                 return;
@@ -122,14 +148,41 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
             }
         }
         try {
-            if (extractEncrprmFromBody.isPresent()) {
+            if (hasBodyEncr) {
                 this.encryptedInQuery = false;
+                Optional<String> extractEncrprmFromBody = UltimusMessageParser.extractEncrprmFromBody(request);
+                if (extractEncrprmFromBody.isEmpty()) {
+                    this.editor.setContents(ByteArray.byteArray("No encrprm found in body."));
+                    this.statusLabel.setText("Nothing to decrypt.");
+                    return;
+                }
+                if (UltimusMessageParser.isOversizedForEditor(extractEncrprmFromBody.get())) {
+                    this.passThroughLarge = true;
+                    this.editor.setContents(ByteArray.byteArray(
+                            "Large encrprm ciphertext — not decrypted in UI to avoid freezing Burp.\n\n"
+                                    + "Forward/Send will pass the original encrypted body through and only refresh x-RToken."));
+                    this.statusLabel.setText("Large encrprm pass-through.");
+                    return;
+                }
                 String decrypted = this.crypto.decrypt(extractEncrprmFromBody.get(), this.session.otk());
+                if (UltimusMessageParser.isOversizedForEditor(decrypted)) {
+                    this.passThroughLarge = true;
+                    this.editor.setContents(ByteArray.byteArray(
+                            "Decrypted payload is too large for the Ultimus editor (" + decrypted.length() + " chars).\n\n"
+                                    + "Forward/Send will pass the original encrypted body through and only refresh x-RToken."));
+                    this.statusLabel.setText("Large decrypted pass-through.");
+                    return;
+                }
                 this.editor.setContents(ByteArray.byteArray(UltimusMessageParser.prepareEditorText(decrypted)));
-                String sizeNote = decrypted.length() > 512 * 1024 ? " (large payload; pretty-print skipped)" : "";
-                this.statusLabel.setText("POST body decrypted." + sizeNote + (this.readOnly ? " [read-only]" : " [editable]"));
+                this.statusLabel.setText("POST body decrypted." + (this.readOnly ? " [read-only]" : " [editable]"));
             } else {
                 this.encryptedInQuery = true;
+                Optional<String> extractEncrprmFromQuery = UltimusMessageParser.extractEncrprmFromQuery(request);
+                if (extractEncrprmFromQuery.isEmpty()) {
+                    this.editor.setContents(ByteArray.byteArray("No encrprm found in query."));
+                    this.statusLabel.setText("Nothing to decrypt.");
+                    return;
+                }
                 String decrypted = this.crypto.decrypt(extractEncrprmFromQuery.get(), this.session.otk());
                 this.editor.setContents(ByteArray.byteArray(UltimusMessageParser.prepareEditorText(decrypted)));
                 this.statusLabel.setText("URL query decrypted." + (this.readOnly ? " [read-only]" : " [editable]"));
@@ -164,6 +217,7 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
     }
 
     public boolean isModified() {
-        return !this.readOnly && this.editor.isModified();
+        // Large pass-through must never report modified, or Burp may try to rebuild from the notice text.
+        return !this.passThroughLarge && !this.readOnly && this.editor.isModified();
     }
 }

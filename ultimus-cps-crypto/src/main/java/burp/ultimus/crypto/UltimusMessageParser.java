@@ -8,14 +8,36 @@ import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/* loaded from: ultimus-cps-crypto.jar:burp/ultimus/crypto/UltimusMessageParser.class */
 public final class UltimusMessageParser {
     private static final Pattern ENCRPRM_QUERY = Pattern.compile("[?&]encrprm=([^&#\\s]+)");
     private static final Pattern ENCRPRM_BODY = Pattern.compile("\"encrprm\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern ENCRDATA_BODY = Pattern.compile("\"encrdata\"\\s*:\\s*\"([^\"]+)\"");
-    private static final int EDITOR_PRETTY_LIMIT = 512 * 1024;
+    /** Skip expand/pretty above this size. */
+    private static final int EDITOR_PRETTY_LIMIT = 128 * 1024;
+    /**
+     * Do not decrypt or load payloads larger than this into the Ultimus editor.
+     * ID-image uploads often exceed this; loading them freezes Burp and blocks Forward/Send.
+     */
+    public static final int EDITOR_LOAD_LIMIT = 256 * 1024;
+    /** Skip handler auto-encrypt above this size (client JS should already encrypt). */
+    public static final int AUTO_ENCRYPT_LIMIT = 512 * 1024;
 
     private UltimusMessageParser() {
+    }
+
+    public static int bodyLength(HttpRequest httpRequest) {
+        if (httpRequest == null || httpRequest.body() == null) {
+            return 0;
+        }
+        return httpRequest.body().length();
+    }
+
+    public static boolean isOversizedForEditor(HttpRequest httpRequest) {
+        return bodyLength(httpRequest) > EDITOR_LOAD_LIMIT;
+    }
+
+    public static boolean isOversizedForEditor(String bodyOrCiphertext) {
+        return bodyOrCiphertext != null && bodyOrCiphertext.length() > EDITOR_LOAD_LIMIT;
     }
 
     public static boolean isUltimusRequest(HttpRequest httpRequest) {
@@ -82,11 +104,20 @@ public final class UltimusMessageParser {
     }
 
     public static boolean hasEncrprmInQuery(HttpRequest httpRequest) {
-        return extractEncrprmFromQuery(httpRequest).isPresent();
+        if (httpRequest == null) {
+            return false;
+        }
+        String path = httpRequest.path();
+        return path != null && path.contains("encrprm=");
     }
 
     public static boolean hasEncrprmInBody(HttpRequest httpRequest) {
-        return extractEncrprmFromBody(httpRequest).isPresent();
+        // Presence-only: do not capture multi-MB ciphertext just to check.
+        return httpRequest != null && httpRequest.contains("encrprm", false);
+    }
+
+    public static boolean hasEncrdata(String str) {
+        return str != null && str.contains("encrdata");
     }
 
     public static Optional<String> extractEncrdata(String str) {
@@ -105,12 +136,23 @@ public final class UltimusMessageParser {
     }
 
     public static boolean looksLikePlaintextJson(HttpRequest httpRequest) {
+        if (httpRequest == null) {
+            return false;
+        }
+        // Fast rejects without allocating the full body string when possible.
+        if (httpRequest.contains("encrprm", false) || httpRequest.contains("encrdata", false)) {
+            return false;
+        }
+        int len = bodyLength(httpRequest);
+        if (len < 2) {
+            return false;
+        }
         String bodyToString = httpRequest.bodyToString();
         if (bodyToString == null) {
             return false;
         }
         String trim = bodyToString.trim();
-        return trim.startsWith("{") && trim.endsWith("}") && !trim.contains("\"encrprm\"") && !trim.contains("\"encrdata\"");
+        return trim.startsWith("{") && trim.endsWith("}");
     }
 
     public static HttpRequest withEncryptedQuery(HttpRequest httpRequest, String str) {

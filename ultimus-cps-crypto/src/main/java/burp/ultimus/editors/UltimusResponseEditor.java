@@ -27,6 +27,7 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
     private final boolean readOnly;
     private HttpRequestResponse requestResponse;
     private String otk;
+    private boolean passThroughLarge;
     private final JPanel panel = new JPanel(new BorderLayout(4, 4));
     private final JLabel statusLabel = new JLabel(" ");
     private final RawEditor editor;
@@ -51,7 +52,7 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
             return null;
         }
         HttpResponse response = this.requestResponse.response();
-        if (this.readOnly || !this.editor.isModified() || this.otk == null) {
+        if (this.passThroughLarge || this.readOnly || !this.editor.isModified() || this.otk == null) {
             return response;
         }
         try {
@@ -67,15 +68,39 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
     public void setRequestResponse(HttpRequestResponse httpRequestResponse) {
         this.requestResponse = httpRequestResponse;
         this.otk = null;
+        this.passThroughLarge = false;
         if (httpRequestResponse == null || httpRequestResponse.response() == null) {
             this.editor.setContents(ByteArray.byteArray(""));
             this.statusLabel.setText("No response.");
             return;
         }
-        Optional<String> extractEncrdata = UltimusMessageParser.extractEncrdata(httpRequestResponse.response().bodyToString());
+        HttpResponse response = httpRequestResponse.response();
+        int bodyLen = response.body() == null ? 0 : response.body().length();
+        if (!response.contains("encrdata", false)) {
+            this.editor.setContents(ByteArray.byteArray("No encrdata field in response."));
+            this.statusLabel.setText("Nothing to decrypt.");
+            return;
+        }
+        if (bodyLen > UltimusMessageParser.EDITOR_LOAD_LIMIT) {
+            this.passThroughLarge = true;
+            this.editor.setContents(ByteArray.byteArray(
+                    "Large Ultimus response (" + bodyLen + " bytes) — not decrypted in UI to avoid freezing Burp.\n\n"
+                            + "Forward will pass the original response through. Use the Raw tab to inspect."));
+            this.statusLabel.setText("Large response pass-through (" + bodyLen + " bytes).");
+            return;
+        }
+        Optional<String> extractEncrdata = UltimusMessageParser.extractEncrdata(response.bodyToString());
         if (extractEncrdata.isEmpty()) {
             this.editor.setContents(ByteArray.byteArray("No encrdata field in response."));
             this.statusLabel.setText("Nothing to decrypt.");
+            return;
+        }
+        if (UltimusMessageParser.isOversizedForEditor(extractEncrdata.get())) {
+            this.passThroughLarge = true;
+            this.editor.setContents(ByteArray.byteArray(
+                    "Large encrdata ciphertext — not decrypted in UI to avoid freezing Burp.\n\n"
+                            + "Forward will pass the original response through."));
+            this.statusLabel.setText("Large encrdata pass-through.");
             return;
         }
         if (httpRequestResponse.request() == null) {
@@ -98,9 +123,17 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
         this.otk = otkOpt.get();
         try {
             String decrypted = this.crypto.decrypt(extractEncrdata.get(), this.otk);
+            if (UltimusMessageParser.isOversizedForEditor(decrypted)) {
+                this.passThroughLarge = true;
+                this.otk = null;
+                this.editor.setContents(ByteArray.byteArray(
+                        "Decrypted response is too large for the Ultimus editor (" + decrypted.length() + " chars).\n\n"
+                                + "Forward will pass the original response through."));
+                this.statusLabel.setText("Large decrypted pass-through.");
+                return;
+            }
             this.editor.setContents(ByteArray.byteArray(UltimusMessageParser.prepareEditorText(decrypted)));
-            String sizeNote = decrypted.length() > 512 * 1024 ? " (large payload; pretty-print skipped)" : "";
-            this.statusLabel.setText("Decrypted response. RSID=" + rsidFromRequest.get() + sizeNote + (this.readOnly ? " [read-only]" : " [editable]"));
+            this.statusLabel.setText("Decrypted response. RSID=" + rsidFromRequest.get() + (this.readOnly ? " [read-only]" : " [editable]"));
         } catch (Exception e) {
             this.otk = null;
             this.editor.setContents(ByteArray.byteArray("Decrypt failed: " + e.getMessage()));
@@ -112,11 +145,8 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
         if (httpRequestResponse == null || httpRequestResponse.response() == null) {
             return false;
         }
-        HttpResponse response = httpRequestResponse.response();
-        if (!response.contains("encrdata", false)) {
-            return false;
-        }
-        return UltimusMessageParser.extractEncrdata(response.bodyToString()).isPresent();
+        // Presence-only — do not extract multi-MB encrdata just to enable the tab.
+        return httpRequestResponse.response().contains("encrdata", false);
     }
 
     public String caption() {
@@ -132,6 +162,6 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
     }
 
     public boolean isModified() {
-        return !this.readOnly && this.editor.isModified();
+        return !this.passThroughLarge && !this.readOnly && this.editor.isModified();
     }
 }

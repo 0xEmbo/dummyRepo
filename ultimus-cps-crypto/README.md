@@ -12,7 +12,8 @@ Burp Suite extension that decrypts/encrypts Ultimus CPS `encrprm` / `encrdata` t
 ## Fixes in this build
 
 - **Response Ultimus tab is editable** during Proxy intercept / Repeater (respects Burp `EditorMode`). Edited plaintext is re-encrypted into `encrdata` when you forward/send.
-- **Send no longer freezes** on large image-upload payloads: unmodified requests only refresh tokens (no full re-encrypt), and large bodies skip expand/pretty-print on the UI thread.
-- **Binary/image responses** are skipped by the HTTP handler HTML session scanner so large upload responses do not block Burp.
+- **ID image / large form Send no longer freezes**: bodies over ~256KB are **not** decrypted or loaded into the Ultimus editor (pass-through + token refresh only). Decrypting multi-MB ID images into the UI was freezing Burp so Forward/Send never completed.
+- Fast `encrprm` / `encrdata` presence checks (no capturing multi-MB ciphertext just to enable tabs).
+- Handler skips auto-encrypt for plaintext bodies over ~512KB and skips binary/image responses in the HTML session scanner.
 
 Crypto algorithms (`UltimusCrypto`, token/format codecs) are unchanged.

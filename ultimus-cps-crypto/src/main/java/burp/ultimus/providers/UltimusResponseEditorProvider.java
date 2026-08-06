@@ -21,6 +21,6 @@ public class UltimusResponseEditorProvider implements HttpResponseEditorProvider
 
     @Override
     public ExtensionProvidedHttpResponseEditor provideHttpResponseEditor(EditorCreationContext creationContext) {
-        return new UltimusResponseEditor(api, keyCache, crypto);
+        return new UltimusResponseEditor(api, keyCache, crypto, creationContext.editorMode());
     }
 }

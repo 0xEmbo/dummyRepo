@@ -158,6 +158,21 @@ public final class UltimusMessageParser {
         return updated.withUpdatedHeader("Content-Type", "application/json; charset=utf-8");
     }
 
+    /**
+     * Rebuilds an Ultimus response body with a new encrypted {@code encrdata} value.
+     * Preserves sibling JSON fields when the original body is a JSON object containing {@code encrdata}.
+     */
+    public static String withEncryptedEncrdataBody(String originalBody, String encrdata) {
+        String escaped = jsonEscape(encrdata);
+        if (originalBody != null && !originalBody.isBlank()) {
+            Matcher matcher = ENCRDATA_BODY.matcher(originalBody);
+            if (matcher.find()) {
+                return matcher.replaceFirst(Matcher.quoteReplacement("\"encrdata\":\"" + escaped + "\""));
+            }
+        }
+        return "{\"encrdata\":\"" + escaped + "\"}";
+    }
+
     public static String formatForEditor(String plaintext) {
         try {
             if (plaintext != null && plaintext.length() > MAX_EDITOR_PRETTY_CHARS) {

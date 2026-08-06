@@ -56,7 +56,14 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
             return response;
         }
         try {
-            String plaintext = new String(editor.getContents().getBytes(), StandardCharsets.UTF_8);
+            byte[] editorBytes = editor.getContents().getBytes();
+            if (editorBytes.length > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
+                return response;
+            }
+            String plaintext = new String(editorBytes, StandardCharsets.UTF_8);
+            if (plaintext.contains("data:image")) {
+                return response;
+            }
             return UltimusResponseMutator.applyPlaintext(response, plaintext, otk, crypto);
         } catch (Exception exception) {
             api.logging().logToError("Ultimus response re-encrypt failed: " + exception.getMessage());
@@ -136,20 +143,22 @@ public class UltimusResponseEditor implements ExtensionProvidedHttpResponseEdito
 
     @Override
     public boolean isEnabledFor(HttpRequestResponse requestResponse) {
-        if (requestResponse == null || requestResponse.response() == null) {
+        try {
+            if (requestResponse == null || requestResponse.response() == null) {
+                return false;
+            }
+            int bodyBytes = requestResponse.response().body().length();
+            if (bodyBytes <= 0 || bodyBytes > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
+                return false;
+            }
+            if (UltimusMessageParser.isBinaryContentType(requestResponse.response())) {
+                return false;
+            }
+            String body = requestResponse.response().bodyToString();
+            return UltimusMessageParser.hasEditableEncrdata(body);
+        } catch (RuntimeException ignored) {
             return false;
         }
-        // Prefer byte length — avoids bodyToString() on huge binary/image responses.
-        int bodyBytes = requestResponse.response().body().length();
-        if (bodyBytes <= 0 || bodyBytes > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
-            return false;
-        }
-        if (UltimusMessageParser.isBinaryContentType(requestResponse.response())) {
-            return false;
-        }
-        String body = requestResponse.response().bodyToString();
-        // Skip enabling the tab when ciphertext alone would freeze decrypt/pretty-print.
-        return UltimusMessageParser.hasEditableEncrdata(body);
     }
 
     @Override

@@ -14,16 +14,16 @@ public final class UltimusMessageParser {
     private static final Pattern ENCRDATA_BODY = Pattern.compile("\"encrdata\"\\s*:\\s*\"([^\"]+)\"");
 
     /** Soft cap for editor pretty-print / expand; larger bodies stay compact to avoid UI freezes. */
-    public static final int MAX_EDITOR_PRETTY_CHARS = 512 * 1024;
+    public static final int MAX_EDITOR_PRETTY_CHARS = 256 * 1024;
 
     /** Soft cap for showing Ultimus editor tabs / decrypting ciphertext in the UI. */
-    public static final int MAX_EDITOR_BODY_BYTES = 2 * 1024 * 1024;
+    public static final int MAX_EDITOR_BODY_BYTES = 256 * 1024;
 
     /** Soft cap for encrprm/encrdata ciphertext length before decrypt-in-editor. */
-    public static final int MAX_EDITOR_CIPHERTEXT_CHARS = 1024 * 1024;
+    public static final int MAX_EDITOR_CIPHERTEXT_CHARS = 128 * 1024;
 
     /** Soft cap for auto-encrypt in the HTTP handler (Repeater/proxy path). */
-    public static final int MAX_AUTO_ENCRYPT_CHARS = 2 * 1024 * 1024;
+    public static final int MAX_AUTO_ENCRYPT_CHARS = 64 * 1024;
 
     private UltimusMessageParser() {
     }

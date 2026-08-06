@@ -14,18 +14,29 @@ import burp.ultimus.crypto.UltimusCrypto;
 import burp.ultimus.crypto.UltimusMessageParser;
 import burp.ultimus.crypto.UltimusRToken;
 import burp.ultimus.crypto.UltimusRequestMutator;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
+/**
+ * HTTP handler that must never block Burp's send/receive pipeline.
+ * Session ingest runs on a background thread; auto-encrypt is limited to tiny JSON bodies.
+ */
 public class UltimusHttpHandler implements HttpHandler {
-    /**
-     * Session pages are small. Anything larger is almost certainly an upload/HTML shell with
-     * embedded images — never run ingest on those (Repeater hang).
-     */
-    private static final int MAX_SESSION_INGEST_BODY_BYTES = 512 * 1024;
+    /** Only tiny HTML session pages — never upload responses. */
+    private static final int MAX_SESSION_INGEST_BODY_BYTES = 64 * 1024;
+
+    /** Auto-encrypt only small plaintext JSON; image uploads must pass through untouched. */
+    private static final int MAX_AUTO_ENCRYPT_BODY_BYTES = 64 * 1024;
 
     private final KeyCache keyCache;
     private final UltimusCrypto crypto;
     private final UltimusRToken rToken;
     private final MontoyaApi api;
+    private final ExecutorService ingestExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "ultimus-session-ingest");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public UltimusHttpHandler(KeyCache keyCache, UltimusCrypto crypto, UltimusRToken rToken, MontoyaApi api) {
         this.keyCache = keyCache;
@@ -36,101 +47,105 @@ public class UltimusHttpHandler implements HttpHandler {
 
     @Override
     public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived response) {
+        // ALWAYS return immediately — never AES/regex on this thread.
         try {
-            maybeCaptureSession(response);
+            scheduleSessionCapture(response);
         } catch (Throwable throwable) {
-            // Never block Burp's HTTP pipeline — a hang here = Repeater spinning forever.
-            api.logging().logToError("Ultimus session capture skipped: " + throwable.getMessage());
+            api.logging().logToError("Ultimus session schedule skipped: " + throwable.getMessage());
         }
         return ResponseReceivedAction.continueWith(response);
     }
 
-    private void maybeCaptureSession(HttpResponseReceived response) {
+    private void scheduleSessionCapture(HttpResponseReceived response) {
         if (response == null) {
             return;
         }
-        // Session keys come from browsing /UltimusCPS/ through Proxy — never from Repeater uploads.
         if (response.toolSource() != null && !response.toolSource().isFromTool(ToolType.PROXY)) {
             return;
         }
-        if (!shouldAttemptSessionCapture(response)) {
+        if (!looksLikeSmallHtml(response)) {
             return;
         }
-        String body = response.bodyToString();
+        int bodyLen = response.body().length();
+        if (bodyLen <= 0 || bodyLen > MAX_SESSION_INGEST_BODY_BYTES) {
+            return;
+        }
+        // Copy body off the request object, then process async.
+        final String body = response.bodyToString();
         if (body == null || body.length() > MAX_SESSION_INGEST_BODY_BYTES) {
             return;
         }
         if (!UltimusMessageParser.isUltimusHtml(body)) {
             return;
         }
-        int before = keyCache.size();
-        keyCache.ingestFromHtml(body, crypto);
-        if (keyCache.size() > before) {
-            api.logging().logToOutput("Ultimus session captured (cache size: " + keyCache.size() + ")");
-        }
+        ingestExecutor.execute(() -> {
+            try {
+                int before = keyCache.size();
+                keyCache.ingestFromHtml(body, crypto);
+                if (keyCache.size() > before) {
+                    api.logging().logToOutput("Ultimus session captured (cache size: " + keyCache.size() + ")");
+                }
+            } catch (Throwable throwable) {
+                api.logging().logToError("Ultimus session ingest failed: " + throwable.getMessage());
+            }
+        });
     }
 
     @Override
     public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent request) {
+        // Default: pass through. Only tiny plaintext Ultimus JSON is auto-encrypted.
         try {
-            return maybeAutoEncrypt(request);
+            HttpRequest maybeEncrypted = maybeAutoEncrypt(request);
+            return RequestToBeSentAction.continueWith(maybeEncrypted);
         } catch (Throwable throwable) {
             api.logging().logToError("Ultimus auto-encrypt skipped: " + throwable.getMessage());
             return RequestToBeSentAction.continueWith(request);
         }
     }
 
-    private RequestToBeSentAction maybeAutoEncrypt(HttpRequestToBeSent request) {
+    private HttpRequest maybeAutoEncrypt(HttpRequestToBeSent request) {
         if (!UltimusMessageParser.isUltimusRequest(request)) {
-            return RequestToBeSentAction.continueWith(request);
+            return request;
         }
         if (UltimusMessageParser.isMultipartOrBinary(request)) {
-            return RequestToBeSentAction.continueWith(request);
+            return request;
         }
-        // Cheap byte-length guard BEFORE bodyToString()/regex.
-        if (request.body().length() > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
-            return RequestToBeSentAction.continueWith(request);
+        int bodyLen = request.body().length();
+        // Image uploads and large encrprm JSON — do nothing.
+        if (bodyLen <= 0 || bodyLen > MAX_AUTO_ENCRYPT_BODY_BYTES) {
+            return request;
         }
         if (UltimusMessageParser.hasEncrprmInBody(request)) {
-            return RequestToBeSentAction.continueWith(request);
+            return request;
         }
         if (!UltimusMessageParser.looksLikePlaintextJson(request)) {
-            return RequestToBeSentAction.continueWith(request);
+            return request;
         }
-        String body = request.bodyToString();
         String rsid = UltimusMessageParser.rsidFromRequest(request).orElse(null);
         if (rsid == null) {
-            return RequestToBeSentAction.continueWith(request);
+            return request;
         }
         SessionMaterial session = keyCache.getSession(rsid).orElse(null);
         if (session == null) {
-            api.logging().logToError("Ultimus: no session for RSID " + rsid + ". Load /UltimusCPS/ in browser first.");
-            return RequestToBeSentAction.continueWith(request);
+            return request;
         }
+        String body = request.bodyToString();
         String plaintext = body == null ? "" : body.trim();
-        HttpRequest encrypted = UltimusRequestMutator.applyBodyPlaintext(
-                request, plaintext, session, crypto, rToken);
-        return RequestToBeSentAction.continueWith(encrypted);
+        return UltimusRequestMutator.applyBodyPlaintext(request, plaintext, session, crypto, rToken);
     }
 
-    private static boolean shouldAttemptSessionCapture(HttpResponseReceived response) {
+    private static boolean looksLikeSmallHtml(HttpResponseReceived response) {
         String contentType = response.headers().stream()
                 .filter(h -> h.name().equalsIgnoreCase("Content-Type"))
                 .map(h -> h.value())
                 .findFirst()
                 .orElse("");
         String lower = contentType.toLowerCase();
-        if (lower.contains("image/")
-                || lower.contains("multipart/")
-                || lower.contains("application/octet-stream")
-                || lower.contains("application/pdf")
-                || lower.contains("video/")
-                || lower.contains("audio/")
-                || lower.contains("font/")
-                || lower.contains("json")) {
-            return false;
+        if (lower.isEmpty()) {
+            return true; // may still be HTML without header
         }
-        int bodyLen = response.body().length();
-        return bodyLen > 0 && bodyLen <= MAX_SESSION_INGEST_BODY_BYTES;
+        return lower.contains("text/html")
+                || lower.contains("text/plain")
+                || lower.contains("application/xhtml");
     }
 }

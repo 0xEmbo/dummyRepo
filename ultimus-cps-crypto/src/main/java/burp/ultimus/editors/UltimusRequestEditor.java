@@ -47,17 +47,21 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
 
     @Override
     public HttpRequest getRequest() {
-        if (requestResponse == null || requestResponse.request() == null || session == null) {
-            return requestResponse != null ? requestResponse.request() : null;
+        if (requestResponse == null || requestResponse.request() == null) {
+            return null;
         }
         HttpRequest request = requestResponse.request();
-        // Never block Repeater Send on uploads / huge bodies — pass through unchanged.
+        if (session == null) {
+            return request;
+        }
+        // Image uploads / huge bodies: never touch — Send must return immediately.
         if (UltimusMessageParser.isMultipartOrBinary(request)
                 || request.body().length() > UltimusMessageParser.MAX_AUTO_ENCRYPT_CHARS) {
             return request;
         }
         if (!editor.isModified()) {
             try {
+                // Normal small Ultimus calls still need fresh x-RToken / query RToken.
                 return UltimusRequestMutator.refreshTokens(request, session, crypto, rToken);
             } catch (Exception exception) {
                 api.logging().logToError("Ultimus token refresh failed: " + exception.getMessage());
@@ -71,6 +75,9 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
                 return request;
             }
             String plaintext = new String(editorBytes, StandardCharsets.UTF_8);
+            if (plaintext.contains("data:image")) {
+                return request;
+            }
             if (encryptedInQuery) {
                 return UltimusRequestMutator.applyQueryPlaintext(request, plaintext, session, crypto, rToken);
             }
@@ -166,17 +173,21 @@ public class UltimusRequestEditor implements ExtensionProvidedHttpRequestEditor 
         if (UltimusMessageParser.isMultipartOrBinary(request)) {
             return false;
         }
-        // Avoid decrypt on multi-MB image-upload JSON; body byte length is checked first.
+        // Hard size gate — image uploads must never open this tab (decrypt on EDT freezes Burp).
         if (request.body().length() > UltimusMessageParser.MAX_EDITOR_BODY_BYTES) {
             return false;
         }
-        if (UltimusMessageParser.hasEncrprmInBody(request)) {
-            return UltimusMessageParser.hasEditableEncrprmInBody(request);
+        try {
+            if (UltimusMessageParser.hasEncrprmInBody(request)) {
+                return UltimusMessageParser.hasEditableEncrprmInBody(request);
+            }
+            if (UltimusMessageParser.hasEncrprmInQuery(request)) {
+                return UltimusMessageParser.hasEditableEncrprmInQuery(request);
+            }
+            return UltimusMessageParser.looksLikePlaintextJson(request);
+        } catch (RuntimeException ignored) {
+            return false;
         }
-        if (UltimusMessageParser.hasEncrprmInQuery(request)) {
-            return UltimusMessageParser.hasEditableEncrprmInQuery(request);
-        }
-        return UltimusMessageParser.looksLikePlaintextJson(request);
     }
 
     @Override

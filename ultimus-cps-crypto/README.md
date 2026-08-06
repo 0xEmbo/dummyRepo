@@ -2,35 +2,34 @@
 
 Burp Suite extension that decrypts/re-encrypts Ultimus CPS `encrprm` / `encrdata` traffic.
 
-## Fix in 1.0.4
+## Fix in 1.0.5 (load this)
 
-Repeater **Send** on image upload no longer spins forever:
+Repeater image-upload **Send** must always get a response:
 
-- Session key capture runs **only for Proxy** traffic (not Repeater/Intruder)
-- `KeyCache` skips `data:image/...;base64,...` with an index scan (no regex capture of multi-MB blobs)
-- Request editor passes through multipart / huge bodies on Send instead of re-encrypting
-- Handler failures never block Burp’s HTTP pipeline
+- HTTP response handling returns immediately; session ingest runs on a **background thread**
+- Auto-encrypt only for tiny JSON bodies (≤64KB) — uploads pass through untouched
+- Ultimus request tab does not re-encrypt large/multipart bodies on Send
+- Editor tabs refuse oversized ciphertext (use Raw tab for uploads)
 
-Encrypt/decrypt algorithms are unchanged.
+Crypto algorithms are unchanged.
 
-## Fix in 1.0.3
+### Install
 
-Hardened the send/editor path so large image-upload JSON (`encrprm` / `encrdata`) cannot freeze Burp. Crypto unchanged.
+1. Burp → Extensions → remove any old **Ultimus CPS Crypto**
+2. Add → Java → select `ultimus-cps-crypto/ultimus-cps-crypto.jar`
+3. Extension class: `burp.ultimus.UltimusBurpExtension`
+4. Confirm Extender output shows: `Ultimus CPS Crypto loaded...`
+5. Browse `/UltimusCPS/` once through **Proxy**
+6. Retry image upload in Repeater (stay on **Raw** tab for the upload request)
 
-## Fix in 1.0.2
+## Earlier fixes
 
-Intercepted / Repeater responses with `encrdata` are editable in the **Ultimus** response tab. Edits are re-encrypted back into `encrdata` on forward/send. Crypto unchanged.
-
-## Fix in 1.0.1
-
-Image upload / large HTML responses with `data:image/...;base64,...` no longer freeze Burp Repeater via session-ingest AES on image blobs. Crypto unchanged.
+- **1.0.4:** Proxy-only ingest, skip `data:image` blobs
+- **1.0.2:** Editable Ultimus response tab (intercept / re-encrypt `encrdata`)
+- **1.0.1:** Initial image data-URI hang mitigation
 
 ## Build
 
 ```bash
 mvn -f ultimus-cps-crypto/pom.xml -q test package
 ```
-
-Load **`ultimus-cps-crypto/ultimus-cps-crypto.jar`** (1.0.4) in Burp → Extensions.
-
-Browse `https://<host>/UltimusCPS/` through **Proxy** once so session keys are captured, then use Repeater.
